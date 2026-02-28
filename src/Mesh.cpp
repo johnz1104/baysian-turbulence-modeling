@@ -292,7 +292,7 @@ void Mesh::computeCellCentersAndVolumes(){
             double sign = (f.owner == ci) ? 1.0 : -1.0;
             vol += sign * Sf.dot(f.center - cells_[ci].center);
         }
-        cells_[ci].volume = std::abs(vol);
+        cells_[ci].volume = std::abs(vol) / 3.0;
         if (cells_[ci].volume < 1e-30) {
             cells_[ci].volume = 1e-20; // fallback for degenerate or nearly flat cells
         }
@@ -499,3 +499,151 @@ Mesh Mesh::loadBinary(const std::string& path) {
 
 
 // add validation mesh
+// patches: "inlet" (x=0), "outlet" (x=Lx), "top" (y=Ly, wall), "bottom" (y=0, wall)
+// y-direction - tanh stretching toward both walls for BL resolution.
+Mesh Mesh::makeChannel2D(int nx, int ny, double Lx, double Ly) {
+    Mesh m;
+    double dz = 1.0; // unit depth for per-unit-depth quantities
+
+    // y-coordinates with tanh stretching toward both walls
+    double stretch = 2.0;
+    std::vector<double> yc(ny + 1);
+    for (int j = 0; j <= ny; ++j) {
+        double eta = static_cast<double>(j) / ny;
+        yc[j] = 0.5 * Ly * (1.0 + std::tanh(stretch * (2.0 * eta - 1.0))
+                                   / std::tanh(stretch));
+    }
+    // uniform x-coordinates
+    std::vector<double> xc(nx + 1);
+    for (int i = 0; i <= nx; ++i) {
+        xc[i] = Lx * static_cast<double>(i) / nx;
+    }
+    // nodes: (nx+1)*(ny+1) * 2 planes (front z=0, back z=dz)
+    int ptsPerPlane = (nx + 1) * (ny + 1);
+    m.nodes_.resize(2 * ptsPerPlane);
+    auto nid = [&](int i, int j, int k) { return k * ptsPerPlane + j * (nx + 1) + i; };
+    for (int j = 0; j <= ny; ++j)
+        for (int i = 0; i <= nx; ++i) {
+            m.nodes_[nid(i, j, 0)] = Vec3(xc[i], yc[j], 0.0);
+            m.nodes_[nid(i, j, 1)] = Vec3(xc[i], yc[j], dz);
+        }
+
+    // cells
+    int nC = nx * ny;
+    m.cells_.resize(nC);
+    auto cid = [&](int i, int j) { return j * nx + i; };
+
+    // faces
+    int nInternalH = nx * (ny - 1);      // horizontal internal (between j, j+1)
+    int nInternalV = (nx - 1) * ny;      // vertical internal   (between i, i+1)
+    m.nInternal_ = nInternalH + nInternalV;
+    int nBnd = 2 * nx + 2 * ny;          // bottom + top + inlet + outlet
+    m.faces_.resize(m.nInternal_ + nBnd);
+
+    int fi = 0;
+
+    // internal horizontal faces
+    for (int j = 0; j < ny - 1; ++j) {
+        for (int i = 0; i < nx; ++i) {
+            Face& f    = m.faces_[fi];
+            f.owner    = cid(i, j);
+            f.neighbor = cid(i, j + 1);
+            double x0 = xc[i], x1 = xc[i + 1];
+            f.center = Vec3(0.5 * (x0 + x1), yc[j + 1], 0.5 * dz);
+            f.area   = (x1 - x0) * dz;
+            f.normal = Vec3(0, 1, 0);
+            m.cells_[f.owner].faces.push_back(fi);
+            m.cells_[f.neighbor].faces.push_back(fi);
+            ++fi;
+        }
+    }
+
+    // internal vertical faces
+    for (int j = 0; j < ny; ++j) {
+        for (int i = 0; i < nx - 1; ++i) {
+            Face& f    = m.faces_[fi];
+            f.owner    = cid(i, j);
+            f.neighbor = cid(i + 1, j);
+            double y0 = yc[j], y1 = yc[j + 1];
+            f.center = Vec3(xc[i + 1], 0.5 * (y0 + y1), 0.5 * dz);
+            f.area   = (y1 - y0) * dz;
+            f.normal = Vec3(1, 0, 0);
+            m.cells_[f.owner].faces.push_back(fi);
+            m.cells_[f.neighbor].faces.push_back(fi);
+            ++fi;
+        }
+    }
+
+    // boundary faces
+    // bottom wall (y = 0)
+    Patch bottom; bottom.name = "bottom"; bottom.type = "wall";
+    for (int i = 0; i < nx; ++i) {
+        Face& f = m.faces_[fi];
+        f.owner = cid(i, 0); f.neighbor = -1;
+        f.patchID = static_cast<int>(m.patches_.size());
+        f.center = Vec3(0.5 * (xc[i] + xc[i + 1]), 0.0, 0.5 * dz);
+        f.area = (xc[i + 1] - xc[i]) * dz;
+        f.normal = Vec3(0, -1, 0);
+        m.cells_[f.owner].faces.push_back(fi);
+        bottom.faces.push_back(fi); ++fi;
+    }
+    m.patches_.push_back(std::move(bottom));
+
+    // top wall (y = Ly)
+    Patch top; top.name = "top"; top.type = "wall";
+    for (int i = 0; i < nx; ++i) {
+        Face& f = m.faces_[fi];
+        f.owner = cid(i, ny - 1); f.neighbor = -1;
+        f.patchID = static_cast<int>(m.patches_.size());
+        f.center = Vec3(0.5 * (xc[i] + xc[i + 1]), Ly, 0.5 * dz);
+        f.area = (xc[i + 1] - xc[i]) * dz;
+        f.normal = Vec3(0, 1, 0);
+        m.cells_[f.owner].faces.push_back(fi);
+        top.faces.push_back(fi); ++fi;
+    }
+    m.patches_.push_back(std::move(top));
+
+    // inlet (x = 0)
+    Patch inlet; inlet.name = "inlet"; inlet.type = "inlet";
+    for (int j = 0; j < ny; ++j) {
+        Face& f = m.faces_[fi];
+        f.owner = cid(0, j); f.neighbor = -1;
+        f.patchID = static_cast<int>(m.patches_.size());
+        f.center = Vec3(0.0, 0.5 * (yc[j] + yc[j + 1]), 0.5 * dz);
+        f.area = (yc[j + 1] - yc[j]) * dz;
+        f.normal = Vec3(-1, 0, 0);
+        m.cells_[f.owner].faces.push_back(fi);
+        inlet.faces.push_back(fi); ++fi;
+    }
+    m.patches_.push_back(std::move(inlet));
+
+    // outlet (x = Lx)
+    Patch outlet; outlet.name = "outlet"; outlet.type = "outlet";
+    for (int j = 0; j < ny; ++j) {
+        Face& f = m.faces_[fi];
+        f.owner = cid(nx - 1, j); f.neighbor = -1;
+        f.patchID = static_cast<int>(m.patches_.size());
+        f.center = Vec3(Lx, 0.5 * (yc[j] + yc[j + 1]), 0.5 * dz);
+        f.area = (yc[j + 1] - yc[j]) * dz;
+        f.normal = Vec3(1, 0, 0);
+        m.cells_[f.owner].faces.push_back(fi);
+        outlet.faces.push_back(fi); ++fi;
+    }
+    m.patches_.push_back(std::move(outlet));
+
+    // owner/neighbor lists
+    m.ownerList_.resize(m.nInternal_);
+    m.neighborList_.resize(m.nInternal_);
+    for (int f = 0; f < m.nInternal_; ++f) {
+        m.ownerList_[f]    = m.faces_[f].owner;
+        m.neighborList_[f] = m.faces_[f].neighbor;
+    }
+
+    m.computeCellCentersAndVolumes();
+    m.computeFaceGeometry();
+    m.ComputeInterpolationWeights();
+
+    std::cout << "Channel2D mesh: " << nx << "x" << ny
+              << " (" << m.nCells() << " cells, " << m.nFaces() << " faces)\n";
+    return m;
+}
