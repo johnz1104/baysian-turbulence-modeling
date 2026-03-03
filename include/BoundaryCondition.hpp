@@ -157,6 +157,7 @@ inline void applyKBC(ScalarField& k,
 // Menter (1994) k-omega SST model: omega_wall = 60*nu / (beta1 * y1^2)
 // Apply boundary conditions to specific dissipation rate omega
 // inputs: omega (dissipation scalar field), mesh, BCs, nu (kinematic viscosity), beta1 (default 0.075)
+// enforces the k-omega boundary condition system
 inline void applyOmegaBC(ScalarField& omega, 
                         const Mesh& mesh,
                         const FlowBoundaryConditions& bcs,
@@ -167,7 +168,7 @@ inline void applyOmegaBC(ScalarField& omega,
         const PatchBC& bc = bcs.omegaBC[p];
         for (FaceID fi : pat.faces) {
             switch (bc.type) {
-                case BCType::WallKOmega: {
+                case BCType::WallKOmega: {  // near-wall omega formula Menter (1994)
                     double y1 = std::max(mesh.face(fi).delta, 1e-20);
                     omega.bface(fi) = 60.0 * nu / (beta1 * y1 * y1);
                     break;

@@ -138,8 +138,6 @@ Mesh Mesh::loadOpenFOAM(const std::string& polyMeshDir){
     // extracts OpenFOAM mesh neighbor data (defines adjacent cell assignments internal faces)
     {
         fs::path nbrPath = fs::path(polyMeshDir) / "neighbour";
-        if (!fs::exists(nbrPath))
-            nbrPath = fs::path(polyMeshDir) / "neighbor"; // US spelling fallback
         std::ifstream ifs(nbrPath);
         if (!ifs) throw std::runtime_error("Cannot open neighbour file in " + polyMeshDir);
         int nNbr = readFoamCount(ifs);
@@ -152,7 +150,7 @@ Mesh Mesh::loadOpenFOAM(const std::string& polyMeshDir){
         }
     }
 
-    // determine total cell count from face owner and neighbour indices
+    // determine total cell count from face owner and neighbor indices
     int nCells = 0;
     for (auto& f : m.faces_) {
         nCells = std::max(nCells, f.owner + 1);
@@ -160,7 +158,7 @@ Mesh Mesh::loadOpenFOAM(const std::string& polyMeshDir){
     }
     m.cells_.resize(nCells);
 
-    // build cell-face adjacency (assigns each face to its owner and neighbour cells)
+    // build cell-face adjacency (assigns each face to its owner and neighbor cells)
     for (int fi = 0; fi < static_cast<int>(m.faces_.size()); ++fi) {
         m.cells_[m.faces_[fi].owner].faces.push_back(fi);
         if (m.faces_[fi].neighbor >= 0)
@@ -301,8 +299,8 @@ void Mesh::computeCellCentersAndVolumes(){
 
 // computes face-cell distance vectors and magnitudes
 void Mesh::computeFaceGeometry() {
-    // delta = distance between owner and neighbour centers
-    // d     = vector from owner to neighbour centers
+    // delta = distance between owner and neighbor centers
+    // d     = vector from owner to neighbor centers
     for (int fi = 0; fi < nFaces(); ++fi) {
         Face& f = faces_[fi];
         if (!f.isBoundary()) {
@@ -639,7 +637,13 @@ Mesh Mesh::makeChannel2D(int nx, int ny, double Lx, double Ly) {
         m.neighborList_[f] = m.faces_[f].neighbor;
     }
 
-    m.computeCellCentersAndVolumes();
+    for (int j = 0; j < ny; ++j) {                                                                                                                                                                                  
+        for (int i = 0; i < nx; ++i) {                                                                                                                                                                              
+            Cell& c = m.cells_[cid(i, j)];                                                                                                                                                                          
+            c.center = Vec3(0.5*(xc[i]+xc[i+1]), 0.5*(yc[j]+yc[j+1]), 0.5*dz);                                                                                                                                      
+            c.volume = (xc[i+1]-xc[i]) * (yc[j+1]-yc[j]) * dz;                                                                                                                                               
+        }                                                                                                                                                                                                    
+    } 
     m.computeFaceGeometry();
     m.ComputeInterpolationWeights();
 

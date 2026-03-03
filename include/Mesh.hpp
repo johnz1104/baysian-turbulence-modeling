@@ -25,15 +25,14 @@ struct Vec3 {
         return {y*o.z - z*o.y, z*o.x - x*o.z, x*o.y - y*o.x };              
     }
     double norm()  const { return std::sqrt(x*x + y*y + z*z);}              // vector norm
-    double norm2() const { return x*x + y*y + z*z;}                        // vector norm squared
+    double norm2() const { return x*x + y*y + z*z;}                         // vector norm squared
 
     Vec3   unit()  const { double n = norm();                               // unit vector
         return (n > 1e-300) ? (*this)/n : Vec3{}; 
     }
 };
 
-inline Vec3 operator*(double s, const Vec3& v) { return v * s; }
-
+inline Vec3 operator*(double s, const Vec3& v) { return v * s; }             // vector scaling
 
 // Mesh Topology Indices
 using CellID = int;         // volumes
