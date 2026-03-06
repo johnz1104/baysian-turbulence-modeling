@@ -71,9 +71,11 @@ struct SolverSettings {
 
     // turbulence activation
     int turbStartIter = 5;      // freeze turb for first N outer iterations
+    int turbUpdateInterval = 1; // update turbulence every N outer iterations
 
     // field clamps
     double kMin     = 1e-10;
+    double kMax     = 1e10;    // upper bound on k (set to ~100*kInit to prevent blow-up)
     double omegaMin = 1e-6;
 
     // reporting
@@ -118,16 +120,27 @@ private:
     std::unique_ptr<ILinearSolver> tSolver_;
 
     // working storage
-    // stores diagonal momentum coefficients 
+    // stores diagonal momentum coefficients
     // needed for Rhie-Chow interpolation (prevents pressure oscillations)
-    std::vector<double> aP_;    
+    std::vector<double> aP_;            // relaxed diagonal (aP_raw/alphaU) — used for velocity correction
+    std::vector<double> aPunrelaxed_;   // unrelaxed diagonal (aP_raw) — used for pressure Laplacian
+
+    // iter-0 residual norms for normalisation
+    // convergence is measured as orders-of-magnitude reduction from iter-0 equation imbalance.
+    // equations with negligible iter-0 residual (e.g. Uy in 2D) are skipped via safeNorm
+    // to prevent division by ~1e-30 from producing false divergence.
+    double normUx0_ = 1, normUy0_ = 1, normP0_ = 1, normK0_ = 1, normOm0_ = 1;
+    bool turbNormSet_ = false;
 
     // equation assembly functions
     // build the lienar system from the PDEs
     void assembleMomentum(LinearSystem& sys, const FlowFields& f, int component, std::vector<double>& aP);
     void assemblePressureCorrection(LinearSystem& sys, const FlowFields& f, const std::vector<double>& aP, ScalarField& pPrime);
     void assembleKEquation(LinearSystem& sys, const FlowFields& f);
-    void assembleOmegaEquation(LinearSystem& sys, const FlowFields& f);
+    // Smag: frozen strain-rate magnitude from computeFields (pre-correction U).
+    // Using the post-correction Smag (recomputed from updated f.U) amplifies
+    // pressure-correction oscillations into large omega production, causing blow-up.
+    void assembleOmegaEquation(LinearSystem& sys, const FlowFields& f, const ScalarField& Smag);
 
     // correction functions 
     void correctVelocity(FlowFields& f, const ScalarField& pPrime, const std::vector<double>& aP);

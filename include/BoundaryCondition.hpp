@@ -77,10 +77,22 @@ struct FlowBoundaryConditions {
         }
         return bc;
         }
-        // flat plat that use same BC as channel flow
+        // flat plate: bottom = wall, top = freestream (Dirichlet at inlet values), inlet/outlet same as channel
+        // the top boundary must be freestream, not wall — otherwise we solve a channel problem, not a flat plate
         static FlowBoundaryConditions flatPlateDefaults(
             const Mesh& mesh, double Uinf, double kIn, double omIn) {
-        return channelDefaults(mesh, Uinf, kIn, omIn);
+        FlowBoundaryConditions bc = channelDefaults(mesh, Uinf, kIn, omIn);
+        // override "top" patch from wall to freestream
+        for (int p = 0; p < mesh.nPatches(); ++p) {
+            const Patch& pat = mesh.patch(p);
+            if (pat.name == "top") {
+                bc.velocityBC[p] = {BCType::Dirichlet, 0.0, Vec3(Uinf, 0, 0), pat.name};
+                bc.pressureBC[p] = {BCType::Neumann, 0.0, {}, pat.name};
+                bc.kBC[p]        = {BCType::Dirichlet, kIn, {}, pat.name};
+                bc.omegaBC[p]    = {BCType::Dirichlet, omIn, {}, pat.name};
+            }
+        }
+        return bc;
     }
 };
 

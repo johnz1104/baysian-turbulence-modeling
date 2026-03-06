@@ -25,7 +25,7 @@ EvaluationResult ForwardModel::evaluate(const std::vector<double>& theta) {
     // bounds check
     if (!paramSet_.inBounds(theta)) {
         result.status = EvaluationStatus::InvalidParameters;
-        result.logLik = -1e30;
+        result.loglik = -1e30;
         return result;
     }
 
@@ -53,8 +53,8 @@ EvaluationResult ForwardModel::evaluate(const std::vector<double>& theta) {
 
         // classify convergence
         if (hist.diverged) {
-            result.status = EvaluationStatus::DivergenceDetected;
-            result.logLik = -1e6;
+            result.status = EvaluationStatus::Diverged;
+            result.loglik = -1e6;
             return result;
         } else if (hist.converged) {
             result.status = EvaluationStatus::Converged;
@@ -67,11 +67,11 @@ EvaluationResult ForwardModel::evaluate(const std::vector<double>& theta) {
 
         // extract observables and log-likelihood
         result.predictions = obsOp_.evaluate(mesh_, fields, nu_);
-        result.logLik = obsOp_.logLikelihood(mesh_, fields, nu_);
+        result.loglik = obsOp_.logLikelihood(mesh_, fields, nu_);
 
     } catch (const std::exception& e) {
         result.status = EvaluationStatus::Unknown;
-        result.logLik = -1e6;
+        result.loglik = -1e6;
         if (settings_.verbose)
             std::cerr << "ForwardModel exception: " << e.what() << "\n";
     }
@@ -84,8 +84,8 @@ double ForwardModel::penalizedLogLikelihood(const std::vector<double>& theta) {
     switch (res.status) {
         case EvaluationStatus::Converged:
         case EvaluationStatus::Unconverged:
-            return res.logLik;
-        case EvaluationStatus::DivergenceDetected:
+            return res.loglik;
+        case EvaluationStatus::Diverged:
         case EvaluationStatus::Unknown:
             return -1e6;
         case EvaluationStatus::InvalidParameters:

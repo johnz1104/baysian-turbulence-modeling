@@ -94,9 +94,16 @@ inline LinearSystem makeSystem(const Mesh& m) {
 }
 
 // result container
+// initialRes tracks the absolute equation imbalance (r0 = |b - Ax0|) before the linear solve
+// this is used for SIMPLE outer-loop convergence instead of finalRes (= rn/r0), which measures
+// only the relative drop within a single linear solve
+// with uniform initial conditions the assembled systems have near-zero RHS, 
+// so finalRes drops below tolerance immediately at iter 0, causing false convergence.  
+// initialRes avoids this by measuring the actual equation residual
 struct SolverResult {
     int    iterations = 0;
-    double finalRes   = 0.0;
+    double finalRes   = 0.0;   // relative residual (rn/r0) — used internally by linear solver
+    double initialRes = 0.0;   // absolute initial residual (r0 = |b - Ax0|) — used for outer convergence
     bool   converged  = false;
 };
 
@@ -145,6 +152,7 @@ public:
 
         A.residual(x, r);
         double r0 = linalg::norm(r);
+        res.initialRes = r0; 
         if (r0 < 1e-30) { res.converged = true; return res; }
 
         linalg::jacobiPrecond(A, r, z);
@@ -190,6 +198,7 @@ public:
 
         A.residual(x, r);
         double r0 = linalg::norm(r);
+        res.initialRes = r0;
         if (r0 < 1e-30) { res.converged = true; return res; }
 
         rh = r;
@@ -211,7 +220,7 @@ public:
             double sn = linalg::norm(s);
             if (sn/r0 < tol) {
                 for (int i = 0; i < n; ++i) x[i] += alpha*ph[i];
-                res = {it+1, sn/r0, true}; return res;
+                res = {it+1, sn/r0, r0, true}; return res;
             }
 
             linalg::jacobiPrecond(A, s, sh);
@@ -244,6 +253,7 @@ public:
         std::vector<double> r(n);
         SolverResult res;
         double b0 = linalg::norm(A.source);
+        res.initialRes = b0;
         if (b0 < 1e-30) b0 = 1.0;
 
         for (int it = 0; it < maxIter; ++it) {

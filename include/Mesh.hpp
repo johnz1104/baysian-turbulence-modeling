@@ -111,6 +111,11 @@ public:
     // domain [0,Lx] x [0,Ly]), useful for validation before full meshes.
     static Mesh makeChannel2D(int nx, int ny, double Lx, double Ly);
 
+    // Re-adaptive wall clustering overload: computes tanh stretch parameter
+    // so the first cell targets yPlusTarget based on Re.
+    static Mesh makeChannel2D(int nx, int ny, double Lx, double Ly,
+                               double Re, double yPlusTarget = 1.0);
+
     // returns count
     int nCells()  const { return static_cast<int>(cells_.size());}
     int nFaces()  const { return static_cast<int>(faces_.size());}
