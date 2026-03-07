@@ -277,11 +277,9 @@ public:
     std::string name() const override { return "GaussSeidel"; }
 };
 
-// ============================================================
-// Algebraic Multigrid (AMG) preconditioned PCG solver
-// ============================================================
 
-// General sparse matrix in CSR format for coarse AMG levels
+// Algebraic Multigrid (AMG) preconditioned PCG solver
+// general sparse matrix in CSR format for coarse AMG levels
 struct CSRMatrix {
     int nRows = 0;
     std::vector<int> rowPtr;
@@ -341,19 +339,19 @@ inline CSRMatrix lduToCSR(const LinearSystem& A) {
     csr.values.resize(nnz);
     csr.diag.resize(n);
 
-    // Build unsorted entries per row using fill pointers
+    // build unsorted entries per row using fill pointers
     std::vector<int> pos(n);
     for (int i = 0; i < n; ++i)
         pos[i] = csr.rowPtr[i];
 
-    // Diagonal first
+    // diagonal first
     for (int i = 0; i < n; ++i) {
         csr.colIdx[pos[i]] = i;
         csr.values[pos[i]] = A.diag[i];
         csr.diag[i] = A.diag[i];
         pos[i]++;
     }
-    // Off-diagonals
+    // off-diagonals
     for (int f = 0; f < A.nIF; ++f) {
         int o = A.own[f], nb = A.nbr[f];
         csr.colIdx[pos[o]] = nb;
@@ -364,10 +362,10 @@ inline CSRMatrix lduToCSR(const LinearSystem& A) {
         pos[nb]++;
     }
 
-    // Sort each row by column index for consistent access
+    // sort each row by column index for consistent access
     for (int i = 0; i < n; ++i) {
         int start = csr.rowPtr[i], end = csr.rowPtr[i + 1];
-        // Simple insertion sort (rows are small)
+        // simple insertion sort (rows are small)
         for (int a = start + 1; a < end; ++a) {
             int key_c = csr.colIdx[a];
             double key_v = csr.values[a];
@@ -384,7 +382,7 @@ inline CSRMatrix lduToCSR(const LinearSystem& A) {
     return csr;
 }
 
-// Greedy aggregation coarsening with strength-of-connection filter
+// greedy aggregation coarsening with strength-of-connection filter
 inline void buildAggregates(const CSRMatrix& A, std::vector<int>& map, int& nCoarse) {
     int n = A.nRows;
     map.assign(n, -1);
@@ -436,7 +434,7 @@ inline CSRMatrix galerkinProduct(const CSRMatrix& A, const std::vector<int>& map
         }
     }
 
-    // Convert to CSR
+    // convert to CSR
     CSRMatrix Ac;
     Ac.nRows = nCoarse;
     Ac.rowPtr.resize(nCoarse + 1, 0);
@@ -451,7 +449,7 @@ inline CSRMatrix galerkinProduct(const CSRMatrix& A, const std::vector<int>& map
     int pos = 0;
     for (int I = 0; I < nCoarse; ++I) {
         Ac.rowPtr[I] = pos;
-        // Collect and sort entries
+        // collect and sort entries
         std::vector<std::pair<int, double>> entries(rows[I].begin(), rows[I].end());
         std::sort(entries.begin(), entries.end());
         for (auto& [col, val] : entries) {
@@ -470,7 +468,7 @@ struct AMGLevel {
     CSRMatrix A;
     std::vector<int> aggregateMap;
     int nCoarse = 0;
-    // Working vectors
+    // working vectors
     std::vector<double> x, b, r;
 };
 
@@ -492,7 +490,7 @@ class AMGSolver : public ILinearSolver {
         lev0.A = lduToCSR(A);
         levels_.push_back(std::move(lev0));
 
-        // Coarsen until small enough
+        // coarsen until small enough
         for (int l = 0; l < maxLevels_; ++l) {
             auto& fine = levels_[l];
             if (fine.A.nRows <= minCoarseSize_) break;
@@ -501,7 +499,7 @@ class AMGSolver : public ILinearSolver {
             int nc;
             buildAggregates(fine.A, map, nc);
 
-            // Stop if coarsening stalls
+            // ctop if coarsening stalls
             if (nc == 0 || nc >= fine.A.nRows) break;
 
             fine.aggregateMap = std::move(map);
@@ -512,7 +510,7 @@ class AMGSolver : public ILinearSolver {
             levels_.push_back(std::move(coarse));
         }
 
-        // Allocate working vectors
+        // allocate working vectors
         for (auto& lev : levels_) {
             int n = lev.A.nRows;
             lev.x.resize(n, 0.0);
@@ -525,21 +523,21 @@ class AMGSolver : public ILinearSolver {
         auto& lev = levels_[level];
         int n = lev.A.nRows;
 
-        // Coarsest level: direct solve with many GS sweeps
+        // coarsest level: direct solve with many GS sweeps
         if (level == (int)levels_.size() - 1) {
             for (int s = 0; s < coarseSweeps_; ++s)
                 lev.A.gaussSeidelSweep(lev.x, lev.b);
             return;
         }
 
-        // Pre-smooth
+        // pre-smooth
         for (int s = 0; s < nPreSmooth_; ++s)
             lev.A.gaussSeidelSweep(lev.x, lev.b);
 
-        // Compute residual
+        // compute residual
         lev.A.residual(lev.x, lev.b, lev.r);
 
-        // Restrict residual to coarse level (R = P^T, piecewise-constant)
+        // restrict residual to coarse level (R = P^T, piecewise-constant)
         auto& coarse = levels_[level + 1];
         int nc = lev.nCoarse;
         std::fill(coarse.b.begin(), coarse.b.end(), 0.0);
@@ -547,19 +545,19 @@ class AMGSolver : public ILinearSolver {
         for (int i = 0; i < n; ++i)
             coarse.b[lev.aggregateMap[i]] += lev.r[i];
 
-        // Recurse
+        // recurse
         vcycle(level + 1);
 
-        // Prolongate correction and add (P is piecewise-constant)
+        // prolongate correction and add (P is piecewise-constant)
         for (int i = 0; i < n; ++i)
             lev.x[i] += coarse.x[lev.aggregateMap[i]];
 
-        // Post-smooth
+        // post-smooth
         for (int s = 0; s < nPostSmooth_; ++s)
             lev.A.gaussSeidelSweep(lev.x, lev.b);
     }
 
-    // Apply AMG as preconditioner: solve M*z ≈ r
+    // apply AMG as preconditioner: solve M*z ≈ r
     void precondition(const std::vector<double>& r, std::vector<double>& z) {
         auto& lev0 = levels_[0];
         int n = lev0.A.nRows;
@@ -570,9 +568,8 @@ class AMGSolver : public ILinearSolver {
     }
 
 public:
-    SolverResult solve(const LinearSystem& A, std::vector<double>& x,
-                       int maxIter = 500, double tol = 1e-6) override {
-        // Rebuild hierarchy (pressure matrix changes each SIMPLE iteration)
+    SolverResult solve(const LinearSystem& A, std::vector<double>& x, int maxIter = 500, double tol = 1e-6) override {
+        // rebuild hierarchy (pressure matrix changes each SIMPLE iteration)
         setup(A);
 
         int n = A.nCells;
