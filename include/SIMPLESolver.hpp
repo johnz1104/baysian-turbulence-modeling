@@ -83,7 +83,7 @@ struct SolverSettings {
     bool verbose        = true;
 
     // linear solver names
-    std::string pressureSolver   = "PCG";
+    std::string pressureSolver   = "AMG";
     std::string momentumSolver   = "BiCGSTAB";
     std::string turbulenceSolver = "BiCGSTAB";
 };
@@ -129,8 +129,7 @@ private:
     // convergence is measured as orders-of-magnitude reduction from iter-0 equation imbalance.
     // equations with negligible iter-0 residual (e.g. Uy in 2D) are skipped via safeNorm
     // to prevent division by ~1e-30 from producing false divergence.
-    double normUx0_ = 1, normUy0_ = 1, normP0_ = 1, normK0_ = 1, normOm0_ = 1;
-    bool turbNormSet_ = false;
+    double normUx0_ = 1, normUy0_ = 1, normP0_ = 1;
 
     // equation assembly functions
     // build the lienar system from the PDEs

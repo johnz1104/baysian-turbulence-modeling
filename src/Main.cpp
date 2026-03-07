@@ -231,7 +231,10 @@ static void demoForwardModel() {
     double Ub = 1.0, Re_b = 6800.0;
     double nu = Ub * h / Re_b;
 
-    Mesh mesh = Mesh::makeChannel2D(nx, ny, Lx, 2.0 * h, Re_b);
+    // Demo uses relaxed y+ target — coarse 30x20 mesh can't benefit from y+=1
+    // and the extreme stretching (3.4) creates terrible aspect ratios that stall
+    // pressure convergence.  y+=5 gives stretch~2.0, well-conditioned cells.
+    Mesh mesh = Mesh::makeChannel2D(nx, ny, Lx, 2.0 * h, Re_b, 5.0);
     mesh.computeWallDistance();
 
     double Tu = 0.05;
@@ -246,12 +249,12 @@ static void demoForwardModel() {
 
     InferenceParameterSet params = InferenceParameterSet::a1_betaStar();
     SolverSettings settings;
-    settings.maxIterations = 10000;   // changed from 2000 to 10000 for more room to converge
+    settings.maxIterations = 8000;
     settings.convergenceTol = 1e-4;
-    settings.reportInterval = 100;
-    settings.alphaP = 0.5;           // increased from 0.4 to 0.5 for more aggressive update
-    settings.innerTolerance = 1e-7;  // tightened from 1e-3 to 1e-7 for pressure accuracy
-    settings.innerIterations = 1000; // increased from 200 to 1000
+    settings.reportInterval = 500;
+    settings.alphaP = 0.8;           // aggressive pressure relaxation (stable on coarse demo mesh)
+    settings.innerTolerance = 1e-6;
+    settings.innerIterations = 500;
     settings.verbose = true;
 
     ForwardModel fm(mesh, params, obsOp, bcs, nu, settings, Vec3(Ub, 0, 0), 0.0, kIn, omIn);

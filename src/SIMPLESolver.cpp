@@ -462,7 +462,6 @@ double SIMPLESolver::computeResidual(const FlowFields& f, int component) {
 // SIMPLE algorithm runs until flow solution converges or diverges
 ConvergenceHistory SIMPLESolver::solve(FlowFields& f) { // input: FlowField object / flow variables
     ConvergenceHistory hist;
-    turbNormSet_ = false;
     // Create working linear systems
     LinearSystem momSys  = makeSystem(mesh_);
     LinearSystem pSys    = makeSystem(mesh_);
@@ -574,7 +573,17 @@ ConvergenceHistory SIMPLESolver::solve(FlowFields& f) { // input: FlowField obje
 
         // 5. Assembly + solve Turbulence equations (k and omega) (on turbulence update iterations)
         SolverResult resK = {}, resOm = {};
+        // Field-change norms for turbulence convergence tracking.
+        // Linear solver initialRes is unreliable for omega because wall re-pinning
+        // overrides the PDE solution at wall cells, creating a persistent equation
+        // imbalance that never goes to zero.  Instead, track whether the fields
+        // have stopped changing between iterations.
+        double omChangeNorm = 0.0, kChangeNorm = 0.0;
         if (turbUpdate) {
+            // Save pre-solve fields for convergence metric
+            std::vector<double> kOld = f.k.data();
+            std::vector<double> omOld = f.omega.data();
+
             // k equation
             assembleKEquation(kSys, f);
             std::vector<double> kVec = f.k.data();
@@ -594,7 +603,7 @@ ConvergenceHistory SIMPLESolver::solve(FlowFields& f) { // input: FlowField obje
             applyOmegaBC(f.omega, mesh_, bcs_, nu_, sst_.coeffs.beta1);
 
             // Wall omega: re-pin near-wall cell centers to the Menter formula each iteration
-            // The ω equation strongly overproduces near walls. The α·S² production term/ drives ω toward O(1e5) 
+            // The ω equation strongly overproduces near walls. The α·S² production term/ drives ω toward O(1e5)
             // and boundary-face diffusion alone cannot enforce the Dirichlet condition
             // Overriding after each solve is standard practice in SST implementations
             for (int pi = 0; pi < mesh_.nPatches(); ++pi) {
@@ -606,30 +615,39 @@ ConvergenceHistory SIMPLESolver::solve(FlowFields& f) { // input: FlowField obje
                     f.omega[face.owner] = 60.0 * nu_ / (sst_.coeffs.beta1 * y1 * y1);
                 }
             }
+
+            // Compute field-change norms: ||phi_new - phi_old||_inf / ||phi_new||_inf
+            double kMaxVal = 1e-30, omMaxVal = 1e-30;
+            double kMaxDiff = 0.0, omMaxDiff = 0.0;
+            for (int ci = 0; ci < mesh_.nCells(); ++ci) {
+                kMaxVal  = std::max(kMaxVal,  std::abs(f.k[ci]));
+                omMaxVal = std::max(omMaxVal, std::abs(f.omega[ci]));
+                kMaxDiff  = std::max(kMaxDiff,  std::abs(f.k[ci] - kOld[ci]));
+                omMaxDiff = std::max(omMaxDiff, std::abs(f.omega[ci] - omOld[ci]));
+            }
+            kChangeNorm  = kMaxDiff / kMaxVal;
+            omChangeNorm = omMaxDiff / omMaxVal;
         }
 
-        // 6. Track residuals using absolute initial residual (equation imbalance)
-        //    normalised by iter-0 values so convergence = orders-of-magnitude reduction.
+        // 6. Track residuals
+        //    Momentum and pressure: absolute initial residual normalised by iter-0 values
+        //    (convergence = orders-of-magnitude reduction in equation imbalance).
+        //    k and omega: field-change norms (||new - old||_inf / ||new||_inf) because
+        //    wall re-pinning creates a persistent equation imbalance that never goes to zero.
         ResidualEntry entry;
         entry.iteration = iter;
         entry.Ux    = resUx.initialRes;
         entry.Uy    = resUy.initialRes;
         entry.Uz    = resUz.initialRes;
         entry.p     = resP.initialRes;
-        entry.k     = resK.initialRes;
-        entry.omega = resOm.initialRes;
+        entry.k     = kChangeNorm;
+        entry.omega = omChangeNorm;
 
         // store iter-0 norms for normalisation
         if (iter == 0) {
             normUx0_ = std::max(entry.Ux, 1e-30);
             normUy0_ = std::max(entry.Uy, 1e-30);
             normP0_  = std::max(entry.p,  1e-30);
-        }
-        // turbulence norms are set at the first iteration where they are active
-        if (turbActive && !turbNormSet_) {
-            normK0_  = std::max(entry.k,  1e-30);
-            normOm0_ = std::max(entry.omega, 1e-30);
-            turbNormSet_ = true;
         }
 
         // normalised residuals (skip equations with negligible iter-0 residual)
@@ -643,8 +661,9 @@ ConvergenceHistory SIMPLESolver::solve(FlowFields& f) { // input: FlowField obje
         double nUx = safeNorm(entry.Ux, normUx0_);
         double nUy = safeNorm(entry.Uy, normUy0_);
         double nP  = safeNorm(entry.p,  normP0_);
-        double nK  = safeNorm(entry.k,  normK0_);
-        double nOm = safeNorm(entry.omega, normOm0_);
+        // k and omega: field-change norms are already normalised (no iter-0 reference needed)
+        double nK  = kChangeNorm;
+        double nOm = omChangeNorm;
         hist.entries.push_back(entry);
 
         // computes maximum normalised residual
