@@ -225,7 +225,457 @@ class GPSurrogate:
         """
         if not self.trained:
             return None
-        return self.gp.kern.lengthscale.values.copy()
+        return self.gp.kern.lengthscale.values.copy()    
+
+# Utility
+
+def _get_param_names(param_set):
+    """Extract parameter names from param_set (C++ or dict)."""
+    if hasattr(param_set, 'active_names'):
+        return param_set.active_names()
+    if isinstance(param_set, dict) and 'names' in param_set:
+        return param_set['names']
+    ndim = param_set.n_active() if hasattr(param_set, 'n_active') else 2
+    return [f"theta_{i}" for i in range(ndim)]
+
+# Bayesian Inference Pipeline]
+
+class BayesianInference:
+    """
+    Bayesian calibration pipeline for SST turbulence coefficients.
+
+    Orchestration: 
+    - Prior specification
+    - Ensemble generation
+    - GP surrogate training
+    - MCMC sampling
+    - Posterior diagnostics
+
+    Parameters:
+    - forward_model: object
+        C++ ForwardModel (via pybind11) or any callable with penalized_log_likelihood(theta) -> float.
+    param_set: object
+        InferenceParameterSet - defines which SST coefficients are active
+    prior: Prior, optional
+        If None, constructs truncated normal prior from param_set defaults
+    """
+
+    def __init__(self, forward_model, param_set, prior = None):
+        self.forward_model = forward_model
+        self.param_set = param_set
+        self.prior = prior if prior is not None else make_prior_from_param_set(param_set)
+        self.surrogate = GPSurrogate()
+
+        # ensemble storage
+        self.ensemble_X = None      # shape (n_valid, ndim)
+        self.ensemble_y = None      # shape (n_valid,)
+        self.ensemble_status = None # list of EvaluationStatus per run
+        
+        #MCMC storage
+        self.samples = None         # shape (n_samples, ndim)
+        self.sampler = None         # emcee sampler object (for diagnostics)
 
 
+    def run_ensemble(self, n_samples = 200, verbose = True):
+        """
+        Builds training dataset for Gaussian Process surrogate 
+        Generate Latin hypercube design and evaluate forward model.
 
+        Each evaluation runs the ful C++ pipeline: 
+        * given theta -> unpack SST coefficients -> SIMPLE solve (AMG pressure, BiCGSTAB momentum)
+        -> observation operator -> Gaussian log-likelihood
+
+        Failed evaluations (diverged, unconverged, invalid parameters) are filtered before surrogatr training, but count is reported
+        
+        Parameters: 
+        - n_samples: int
+            Number of ensemble members, with 200 as default 
+                - number of ensemble members should be proportional to number of active parameters
+        - verbose: bool
+            Prints progress every 20 evalutations
+    
+        Returns: 
+        - X: ndarray, shape (n_valid, ndim)
+        - Y: ndarray, shape (n_valid)
+        """
+        ndim = self.prior.ndim
+        X = latin_hypercube(n_samples, ndim, self.prior.lower, self.prior.upper)
+        y = np.full(n_samples, -np.inf)
+        statuses = []
+
+        t0 = time.time()
+        for i in range(n_samples):
+            theta_list = X[i].tolist()
+
+            # use full evaluate() if available to get status info
+            if hasattr(self.forward_model, 'evaluate'):
+                result = self.forward_model.evaluate(theta_list)
+                y[i] = result.log_lik
+                statuses.append(str(result.status))
+            else:
+                y[i] = self.forward_model.penalized_log_likelihood(theta_list)
+                statuses.append("Unknown")
+
+            if verbose and (i + 1) % 20 == 0:
+                elapsed = time.time() - t0
+                rate = (i + 1) / elapsed
+                print(f"  Ensemble {i+1}/{n_samples}  "
+                      f"loglik={y[i]:.4f}  "
+                      f"[{rate:.1f} eval/s]")
+
+        # filter out failed evaluations
+        valid = y>-1e5
+        self.ensemble_X = X[valid]
+        self.ensemble_y = y[valid]
+        self.ensemble_status = statuses
+
+        n_valid = int(np.sum(valid))
+        n_diverged = n_samples - n_valid
+        elapsed = time.time() - t0
+
+        if verbose: 
+            print(f"\n  Ensemble complete: {n_valid}/{n_samples} valid "
+                  f"({n_diverged} diverged/invalid)  "
+                  f"[{elapsed:.1f}s total]")
+ 
+        return self.ensemble_X, self.ensemble_y
+    
+    # Surrogate training
+
+    def train_surrogate(self, holdout_frac = 0.1, verbose = True):
+        """
+        Train GP surrogate on ensemble data without holdout validation.
+
+        Parameters: 
+        - holdout_frac: float
+            Fraction of ensemble reserved for validation (default 10%)
+        - verbose: bool
+            Print training summary
+        
+        Returns:
+        rmse: float
+            Holdout RMSE (units of log-likelihood)
+        """
+
+        assert self.ensemble_X is not None, \
+            "No ensemble data — call run_ensemble() first"
+
+        n = len(self.ensemble_X)
+        assert n >= 10, \
+            f"Only {n} valid ensemble points — need at least 10"
+ 
+        n_test = max(1, int(n * holdout_frac))
+        idx = np.random.permutation(n)
+ 
+        X_train = self.ensemble_X[idx[n_test:]]
+        y_train = self.ensemble_y[idx[n_test:]]
+        X_test  = self.ensemble_X[idx[:n_test]]
+        y_test  = self.ensemble_y[idx[:n_test]]
+ 
+        self.surrogate.train(X_train, y_train)
+        rmse = self.surrogate.rmse(X_test, y_test)
+ 
+        if verbose:
+            print(f"  Surrogate trained: {len(X_train)} train, "
+                  f"{n_test} holdout")
+            print(f"  Holdout RMSE:      {rmse:.4f}")
+            print(f"  Training time:     {self.surrogate._train_time:.2f}s")
+ 
+            ls = self.surrogate.lengthscales()
+            if ls is not None:
+                names = _get_param_names(self.param_set)
+                print(f"  ARD lengthscales:")
+                for name, l in zip(names, ls):
+                    print(f"    {name:12s}  {l:.4f}")
+ 
+        return rmse
+    
+
+    # Log-Posterior MCMC
+
+    def log_posterior(self, theta):
+        """
+        log p(θ|y) ∝ log p(θ) + log p(y|θ)
+ 
+        Prior: truncated normal on SST coefficients.
+        Likelihood: GP surrogate prediction.
+        """
+        lp = self.prior.log_prior(theta)
+        if not np.isfinite(lp):
+            return -np.inf
+        ll = self.surrogate.log_likelihood(theta)
+        if not np.isfinite(ll):
+            return -np.inf
+        return lp + ll
+    
+
+    # MCMC Sampling
+
+    def run_mcmc(self, n_walkers=32, n_steps=5000, burn_in=1000, thin=1, verbose=True):
+        """
+        Run emcee affine-invariant ensemble sampler.
+ 
+        Walkers are initialised near the prior mean with small random
+        perturbations.  The sampler uses the GP surrogate for likelihood
+        evaluations (~μs per call instead of ~minutes for full CFD).
+ 
+        Parameters
+        n_walkers: int
+            Number of walkers (must be >= 2 * ndim).
+        n_steps: int
+            Total MCMC steps per walker.
+        burn_in: int
+            Steps to discard as burn-in.
+        thin: int
+            Thinning factor for final samples.
+        verbose: bool
+            Print progress and diagnostics.
+ 
+        Returns
+        samples : ndarray, shape (n_effective, ndim)
+            Posterior samples after burn-in and thinning.
+        """
+        import emcee
+ 
+        assert self.surrogate.trained, \
+            "Surrogate not trained — call train_surrogate() first"
+ 
+        ndim = self.prior.ndim
+        if n_walkers < 2 * ndim:
+            n_walkers = 2 * ndim
+            if verbose:
+                print(f"  Increased n_walkers to {n_walkers} (need >= 2*ndim)")
+ 
+        # initialise walkers: small perturbation around prior mean
+        p0 = np.empty((n_walkers, ndim))
+        for i in range(n_walkers):
+            p0[i] = self.prior.means + 0.01 * self.prior.stds * np.random.randn(ndim)
+            p0[i] = np.clip(p0[i], self.prior.lower, self.prior.upper)
+ 
+        self.sampler = emcee.EnsembleSampler(n_walkers, ndim, self.log_posterior)
+ 
+        if verbose:
+            print(f"  MCMC: {n_walkers} walkers x {n_steps} steps "
+                  f"(burn-in={burn_in}, thin={thin})")
+ 
+        t0 = time.time()
+        self.sampler.run_mcmc(p0, n_steps, progress=verbose)
+        elapsed = time.time() - t0
+ 
+        self.samples = self.sampler.get_chain(
+            discard=burn_in, thin=thin, flat=True
+        )
+ 
+        if verbose:
+            print(f"\n  MCMC complete: {len(self.samples)} posterior samples "
+                  f"[{elapsed:.1f}s]")
+            self._print_diagnostics()
+ 
+        return self.samples
+    
+    def _print_diagnostics(self):
+        """Print MCMC convergence diagnostics."""
+        chain = self.sampler.get_chain()
+        n_steps = chain.shape[0]
+        ndim = chain.shape[2]
+ 
+        # heuristic: need at least 50 steps per dimension for a meaningful autocorrelation estimate
+        if n_steps >= 50 * ndim:
+            tau = self.sampler.get_autocorr_time(quiet=True)
+            if np.all(np.isfinite(tau)):
+                names = _get_param_names(self.param_set)
+                print(f"  Autocorrelation times:")
+                for name, t in zip(names, tau):
+                    print(f"    {name:12s}  τ = {t:.1f}")
+                n_eff = len(self.samples) / np.max(tau)
+                print(f"  Effective samples:  ~{int(n_eff)}")
+            else:
+                print("  (Autocorrelation times contain non-finite values — "
+                      "chain may need more steps)")
+        else:
+            print(f"  (Chain too short for autocorrelation estimate: "
+                  f"{n_steps} steps, need ~{50 * ndim}+)")
+ 
+        # acceptance fraction
+        af = self.sampler.acceptance_fraction
+        print(f"  Acceptance fraction: {np.mean(af):.3f} "
+              f"(range [{np.min(af):.3f}, {np.max(af):.3f}])")
+        
+
+    #  Posterior analysis
+ 
+    def posterior_summary(self):
+        """
+        Compute posterior statistics: mean, std, 95% credible interval.
+ 
+        Returns
+        summary : dict
+            Keyed by parameter name.  
+            Each entry contains: mean, std, ci_2.5, ci_97.5, prior_mean, shift
+            shift = (posterior_mean - prior_mean) / prior_std
+                - quantifies how much the data moved the parameter.
+        """
+ 
+        names = _get_param_names(self.param_set)
+        summary = {}
+ 
+        for i, name in enumerate(names):
+            s = self.samples[:, i]
+            shift = (np.mean(s) - self.prior.means[i]) / self.prior.stds[i]
+            summary[name] = {
+                'mean':       float(np.mean(s)),
+                'std':        float(np.std(s)),
+                'ci_2.5':     float(np.percentile(s, 2.5)),
+                'ci_97.5':    float(np.percentile(s, 97.5)),
+                'prior_mean': float(self.prior.means[i]),
+                'shift':      float(shift),
+            }
+ 
+        return summary
+ 
+    def print_summary(self):
+        """Print formatted posterior summary table."""
+        summary = self.posterior_summary()
+        names = _get_param_names(self.param_set)
+ 
+        print(f"\n  {'Parameter':>12s}  {'Prior':>8s}  {'Posterior':>10s}  "
+              f"{'±σ':>7s}  {'95% CI':>18s}  {'Shift':>6s}")
+        print("  " + "-" * 72)
+ 
+        for name in names:
+            s = summary[name]
+            print(f"  {name:>12s}  {s['prior_mean']:8.4f}  {s['mean']:10.4f}  "
+                  f"{s['std']:7.4f}  "
+                  f"[{s['ci_2.5']:.4f}, {s['ci_97.5']:.4f}]  "
+                  f"{s['shift']:+6.2f}σ")
+ 
+    def plot_posterior(self, save_path=None):
+        """
+        Corner plot of posterior with prior means marked.
+        """
+ 
+        import corner
+        names = _get_param_names(self.param_set)
+        fig = corner.corner(
+            self.samples, labels=names,
+            truths=self.prior.means.tolist(),
+            show_titles=True, title_fmt='.4f',
+            quantiles=[0.16, 0.5, 0.84]
+        )
+        if save_path:
+            fig.savefig(save_path, dpi=150, bbox_inches='tight')
+            print(f"  Corner plot saved to {save_path}")
+        return fig
+ 
+
+    #  Posterior predictive check
+
+    def posterior_predictive(self, n_samples=50, verbose=True):
+        """
+        Run forward model at posterior samples to get predictive distribution.
+ 
+        This is expensive (n_samples full CFD solves) but gives the
+        actual posterior predictive uncertainty without surrogate error.
+        Use for final validation, not routine analysis.
+ 
+        Parameters
+        n_samples : int
+            Number of posterior samples to evaluate (subset of full chain).
+        Returns
+        predictions : list of ndarray
+            Each entry is the H(fields) vector from one posterior sample.
+        """
+ 
+        # subsample from posterior
+        idx = np.random.choice(len(self.samples), size=n_samples, replace=False)
+        predictions = []
+        statuses = []
+ 
+        for i, si in enumerate(idx):
+            theta = self.samples[si].tolist()
+            result = self.forward_model.evaluate(theta)
+            predictions.append(np.array(result.predictions))
+            statuses.append(str(result.status))
+ 
+            if verbose and (i + 1) % 10 == 0:
+                print(f"  Predictive check {i+1}/{n_samples}: "
+                      f"{result.status}")
+ 
+        n_converged = sum(1 for s in statuses
+                          if 'Converged' in s or 'Unconverged' in s)
+        if verbose:
+            print(f"  Predictive check complete: "
+                  f"{n_converged}/{n_samples} converged")
+ 
+        return predictions
+
+
+#  Synthetic data generation (pipeline validation)
+ 
+class SyntheticCalibration:
+    """
+    Generate synthetic calibration data for testing the inference pipeline.
+ 
+    Picks "true" SST coefficients (perturbations of Menter defaults),
+    runs the forward model, extracts observables, adds Gaussian noise,
+    and returns the truth + noisy observations for use in calibration.
+ 
+    This validates that the pipeline can recover known parameters
+    before applying it to real/DNS data.
+    """
+ 
+    def __init__(self, forward_model, param_set):
+        self.forward_model = forward_model
+        self.param_set = param_set
+ 
+    def generate(self, perturbation=0.10, noise_std=0.001, verbose=True):
+        """
+        Create synthetic observations from perturbed SST coefficients.
+ 
+        Parameters
+        ----------
+        perturbation : float
+            Fractional perturbation from Menter defaults (e.g. 0.10 = 10%).
+        noise_std : float
+            Additive Gaussian noise standard deviation on observables.
+ 
+        Returns
+        -------
+        theta_true : ndarray
+            The "true" parameter vector used to generate data.
+        obs_noisy : ndarray
+            Noisy synthetic observations.
+        """
+        if hasattr(self.param_set, 'pack'):
+            # C++ pybind11 InferenceParameterSet
+            from rans_sst_py import SSTCoefficients
+            defaults = np.array(self.param_set.pack(SSTCoefficients()))
+            lo = np.array(self.param_set.lower_bounds())
+            hi = np.array(self.param_set.upper_bounds())
+        else:
+            # dict fallback
+            defaults = np.array(self.param_set['defaults'])
+            lo = np.array(self.param_set['lower'])
+            hi = np.array(self.param_set['upper'])
+ 
+        # perturb defaults
+        theta_true = defaults * (1.0 + perturbation * np.random.randn(len(defaults)))
+        theta_true = np.clip(theta_true, lo, hi)
+ 
+        # run forward model at true parameters
+        result = self.forward_model.evaluate(theta_true.tolist())
+ 
+        if verbose:
+            print(f"  Synthetic truth:    θ = {theta_true}")
+            print(f"  Forward model:      {result.status}")
+            print(f"  Clean predictions:  {result.predictions}")
+ 
+        # add noise
+        obs_clean = np.array(result.predictions)
+        obs_noisy = obs_clean + noise_std * np.random.randn(len(obs_clean))
+ 
+        if verbose:
+            print(f"  Noisy observations: {obs_noisy}")
+            print(f"  Noise std:          {noise_std}")
+ 
+        return theta_true, obs_noisy
