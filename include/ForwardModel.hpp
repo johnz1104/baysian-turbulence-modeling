@@ -124,6 +124,10 @@ public:
     WarmStartCache& cache() { return cache_; } // access warm-start cache (inspect, clear, resize)
     const InferenceParameterSet& paramSet() const { return paramSet_; }
 
+    // last solved flow fields (retained for visualization / post-processing)
+    const FlowFields& lastFields() const { return lastFields_; }
+    bool hasLastFields() const { return hasLastFields_; }
+
 private:
     const Mesh& mesh_;
     InferenceParameterSet paramSet_;
@@ -135,4 +139,6 @@ private:
     double pInit_, kInit_, omegaInit_;
 
     WarmStartCache cache_;
+    FlowFields lastFields_;
+    bool hasLastFields_ = false;
 };

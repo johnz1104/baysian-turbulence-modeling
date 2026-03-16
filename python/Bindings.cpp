@@ -5,6 +5,90 @@
 
 namespace py = pybind11;
 
+// Helper: extract cell centers from Mesh as numpy array (n_cells, 3)
+static py::array_t<double> meshCellCenters(const Mesh& mesh) {
+    int nc = mesh.nCells();
+    py::array_t<double> arr({nc, 3});
+    auto r = arr.mutable_unchecked<2>();
+    for (int i = 0; i < nc; ++i) {
+        const Vec3& c = mesh.cell(i).center;
+        r(i, 0) = c.x;  r(i, 1) = c.y;  r(i, 2) = c.z;
+    }
+    return arr;
+}
+
+// Helper: extract cell volumes from Mesh as numpy array (n_cells,)
+static py::array_t<double> meshCellVolumes(const Mesh& mesh) {
+    int nc = mesh.nCells();
+    py::array_t<double> arr(nc);
+    auto r = arr.mutable_unchecked<1>();
+    for (int i = 0; i < nc; ++i)
+        r(i) = mesh.cell(i).volume;
+    return arr;
+}
+
+// Helper: extract node coordinates from Mesh as numpy array (n_nodes, 3)
+static py::array_t<double> meshNodeCoords(const Mesh& mesh) {
+    int nn = mesh.nNodes();
+    py::array_t<double> arr({nn, 3});
+    auto r = arr.mutable_unchecked<2>();
+    for (int i = 0; i < nn; ++i) {
+        const Vec3& n = mesh.node(i);
+        r(i, 0) = n.x;  r(i, 1) = n.y;  r(i, 2) = n.z;
+    }
+    return arr;
+}
+
+// Helper: extract face centers from Mesh as numpy array (n_faces, 3)
+static py::array_t<double> meshFaceCenters(const Mesh& mesh) {
+    int nf = mesh.nFaces();
+    py::array_t<double> arr({nf, 3});
+    auto r = arr.mutable_unchecked<2>();
+    for (int i = 0; i < nf; ++i) {
+        const Vec3& c = mesh.face(i).center;
+        r(i, 0) = c.x;  r(i, 1) = c.y;  r(i, 2) = c.z;
+    }
+    return arr;
+}
+
+// Helper: extract scalar field as numpy array (n_cells,)
+static py::array_t<double> scalarToNumpy(const ScalarField& f) {
+    int n = f.size();
+    py::array_t<double> arr(n);
+    auto r = arr.mutable_unchecked<1>();
+    for (int i = 0; i < n; ++i)
+        r(i) = f[i];
+    return arr;
+}
+
+// Helper: extract vector field as numpy array (n_cells, 3)
+static py::array_t<double> vectorToNumpy(const VectorField& f) {
+    int n = f.size();
+    py::array_t<double> arr({n, 3});
+    auto r = arr.mutable_unchecked<2>();
+    for (int i = 0; i < n; ++i) {
+        r(i, 0) = f[i].x;  r(i, 1) = f[i].y;  r(i, 2) = f[i].z;
+    }
+    return arr;
+}
+
+// Helper: extract all fields from ForwardModel's last solution as a dict of numpy arrays
+static py::dict extractFields(const ForwardModel& fm) {
+    if (!fm.hasLastFields())
+        throw std::runtime_error("No fields available — call evaluate() first");
+    const FlowFields& ff = fm.lastFields();
+    py::dict d;
+    d["U"]     = vectorToNumpy(ff.U);
+    d["p"]     = scalarToNumpy(ff.p);
+    d["k"]     = scalarToNumpy(ff.k);
+    d["omega"] = scalarToNumpy(ff.omega);
+    d["nuT"]   = scalarToNumpy(ff.nuT);
+    d["F1"]    = scalarToNumpy(ff.F1);
+    d["F2"]    = scalarToNumpy(ff.F2);
+    d["Pk"]    = scalarToNumpy(ff.Pk);
+    return d;
+}
+
 PYBIND11_MODULE(rans_sst_py, m) {
     m.doc() = "RANS-SST Bayesian Calibration – C++ Forward Model";
     // EvaluationStatus
@@ -53,7 +137,7 @@ PYBIND11_MODULE(rans_sst_py, m) {
         .def_static("near_wall4", &InferenceParameterSet::nearWall4)
         .def_static("all11", &InferenceParameterSet::all11);
 
-    // Mesh (minimal exposure)
+    // Mesh
     py::class_<Mesh>(m, "Mesh")
         .def_static("make_channel_2d", py::overload_cast<int, int, double, double>(&Mesh::makeChannel2D),
              py::arg("nx"), py::arg("ny"), py::arg("Lx"), py::arg("Ly"))
@@ -64,7 +148,13 @@ PYBIND11_MODULE(rans_sst_py, m) {
         .def("compute_wall_distance", &Mesh::computeWallDistance)
         .def("n_cells", &Mesh::nCells)
         .def("n_faces", &Mesh::nFaces)
-        .def("n_patches", &Mesh::nPatches);
+        .def("n_nodes", &Mesh::nNodes)
+        .def("n_patches", &Mesh::nPatches)
+        .def("n_internal_faces", &Mesh::nInternalFaces)
+        .def("cell_centers", &meshCellCenters)
+        .def("cell_volumes", &meshCellVolumes)
+        .def("node_coords", &meshNodeCoords)
+        .def("face_centers", &meshFaceCenters);
 
     // FlowBoundaryConditions
     py::class_<FlowBoundaryConditions>(m, "FlowBoundaryConditions")
@@ -118,5 +208,7 @@ PYBIND11_MODULE(rans_sst_py, m) {
              py::arg("omega_init") = 1.0)
         .def("evaluate", &ForwardModel::evaluate)
         .def("penalized_log_likelihood", &ForwardModel::penalizedLogLikelihood)
-        .def("param_set", &ForwardModel::paramSet, py::return_value_policy::reference);
+        .def("param_set", &ForwardModel::paramSet, py::return_value_policy::reference)
+        .def("has_last_fields", &ForwardModel::hasLastFields)
+        .def("last_fields", &extractFields);
 }

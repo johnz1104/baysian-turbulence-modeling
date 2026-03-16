@@ -65,6 +65,10 @@ EvaluationResult ForwardModel::evaluate(const std::vector<double>& theta) {
             // still evaluate - don't bias posterior toward easy regions
         }
 
+        // retain fields for visualization / post-processing
+        lastFields_ = fields;
+        hasLastFields_ = true;
+
         // extract observables and log-likelihood
         result.predictions = obsOp_.evaluate(mesh_, fields, nu_);
         result.loglik = obsOp_.logLikelihood(mesh_, fields, nu_);
