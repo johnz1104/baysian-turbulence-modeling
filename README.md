@@ -19,11 +19,11 @@ RANS turbulence models like Menter's SST k-omega rely on empirical constants tha
 - **Validation cases**: channel flow (Re_b = 6800 vs Dean correlation) and flat plate (Re_L = 2e6 vs Schoenherr correlation)
 - **Python bindings** via pybind11
 - **Bayesian inference layer** MCMC sampler
+- **Flow field visualization**
 
 ### Planned
-
 - Adjoint-based MCMC for gradient-informed proposals
-- Flow field visualization
+
 
 ## Building
 
