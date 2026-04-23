@@ -81,9 +81,20 @@ The posterior samples support:
 
 ### Areas for Expansion
 - Adjoint-based MCMC
-- Stoachastic discrepency term
+- Stochastic discrepancy term
 - Compressible/Heated flow
 - Transient RANS
+
+## Prerequisites
+
+To build and run this project, you will need the following installed on your system:
+
+- **C++ Compiler:** A compiler supporting C++17 or later (e.g., GCC 9+, Clang 10+, Apple Clang).
+- **CMake:** Version 3.15 or newer.
+- **Build System:** `make`
+- **Python:** Python 3.8 or newer (required for the Bayesian inference pipeline and plotting).
+- **Python Packages:** `numpy`, `scipy`, `matplotlib`, `emcee`, and `scikit-learn` (for the GP surrogate). 
+- **pybind11:** Required for Python bindings (often installed via pip or system package manager).
 
 ## Building
 
