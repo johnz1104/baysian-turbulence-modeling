@@ -1,0 +1,7 @@
+build/
+compile_commands.json
+.DS_Store
+.vscode/
+.claude
+python/__pycache__
+Theory/
